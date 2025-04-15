@@ -103,7 +103,6 @@ def create_samples(N=256, voxel_origin=[0, 0, 0], cube_length=2.0):
 #----------------------------------------------------------------------------
 
 @click.command()
-@click.option('--eg3d', 'eg3d_pkl', help='EG3D network pickle filename', required=True)
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--seeds', type=parse_range, help='List of random seeds (e.g., \'0,1,4-6\')', required=True)
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
@@ -116,7 +115,6 @@ def create_samples(N=256, voxel_origin=[0, 0, 0], cube_length=2.0):
 @click.option('--shape-format', help='Shape Format', type=click.Choice(['.mrc', '.ply']), default='.mrc')
 @click.option('--reload_modules', help='Overload persistent modules?', type=bool, required=False, metavar='BOOL', default=False, show_default=True)
 def generate_images(
-    eg3d_pkl: str,
     network_pkl: str,
     seeds: List[int],
     truncation_psi: float,
@@ -139,11 +137,6 @@ def generate_images(
         --network=ffhq-rebalanced-128.pkl
     """
 
-    print('Loading eg3d networks from "%s"...' % eg3d_pkl)
-    device = torch.device('cuda')
-    with dnnlib.util.open_url(eg3d_pkl) as f:
-        G_eg3d = legacy.load_network_pkl(f)['G_ema'].to(device)
-
     print('Loading networks from "%s"...' % network_pkl)
     device = torch.device('cuda')
     with dnnlib.util.open_url(network_pkl) as f:
@@ -158,8 +151,6 @@ def generate_images(
         G_new.rendering_kwargs = G.rendering_kwargs
         G = G_new
 
-    # G = G_eg3d
-
     os.makedirs(outdir, exist_ok=True)
 
     cam2world_pose = LookAtPoseSampler.sample(3.14/2, 3.14/2, torch.tensor([0, 0, 0.2], device=device), radius=2.7, device=device)
@@ -173,18 +164,15 @@ def generate_images(
         imgs = []
         angle_p = -0.2
         for angle_y, angle_p in [(.4, angle_p), (0, angle_p), (-.4, angle_p)]:
-            cam_pivot = torch.tensor(G_eg3d.rendering_kwargs.get('avg_camera_pivot', [0, 0, 0]), device=device)
-            cam_radius = G_eg3d.rendering_kwargs.get('avg_camera_radius', 2.7)
+            cam_pivot = torch.tensor(G.rendering_kwargs.get('avg_camera_pivot', [0, 0, 0]), device=device)
+            cam_radius = G.rendering_kwargs.get('avg_camera_radius', 2.7)
             cam2world_pose = LookAtPoseSampler.sample(np.pi/2 + angle_y, np.pi/2 + angle_p, cam_pivot, radius=cam_radius, device=device)
             conditioning_cam2world_pose = LookAtPoseSampler.sample(np.pi/2, np.pi/2, cam_pivot, radius=cam_radius, device=device)
             camera_params = torch.cat([cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
             conditioning_params = torch.cat([conditioning_cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
 
-            ws = G_eg3d.mapping(z, conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
-            print(ws.shape)
-            ws = G.mapping(ws[:, 0, :], conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
+            ws = G.mapping(z, conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
             img = G.synthesis(ws, camera_params)['image']
-            # img = G(z, conditioning_params, truncation_psi=truncation_psi)
 
             img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
             imgs.append(img)

@@ -511,11 +511,14 @@ class SynthesisNetwork(torch.nn.Module):
                 block_ws.append(ws.narrow(1, w_idx, block.num_conv + block.num_torgb))
                 w_idx += block.num_conv
 
-        x = img = None
+        x = img = x_raw = img_raw = None
         for res, cur_ws in zip(self.block_resolutions, block_ws):
             block = getattr(self, f'b{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
-        return img
+            if res == 128:
+                x_raw = x
+                img_raw = img
+        return img, x, img_raw, x_raw
 
     def extra_repr(self):
         return ' '.join([

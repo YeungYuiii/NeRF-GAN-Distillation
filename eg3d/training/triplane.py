@@ -67,7 +67,7 @@ class TriPlaneGenerator(torch.nn.Module):
         if use_cached_backbone and self._last_planes is not None:
             planes = self._last_planes
         else:
-            planes = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
+            planes, x, img_raw, x_raw = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
         if cache_backbone:
             self._last_planes = planes
 
@@ -86,18 +86,18 @@ class TriPlaneGenerator(torch.nn.Module):
         rgb_image = feature_image[:, :3]
         sr_image = self.superresolution(rgb_image, feature_image, ws, noise_mode=self.rendering_kwargs['superresolution_noise_mode'], **{k:synthesis_kwargs[k] for k in synthesis_kwargs.keys() if k != 'noise_mode'})
 
-        return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image}
+        return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image, 'feature_image': feature_image}
     
     def sample(self, coordinates, directions, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
         # Compute RGB features, density for arbitrary 3D coordinates. Mostly used for extracting shapes. 
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
-        planes = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
+        planes, x, img_raw, x_raw = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
         planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
         return self.renderer.run_model(planes, self.decoder, coordinates, directions, self.rendering_kwargs)
 
     def sample_mixed(self, coordinates, directions, ws, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
         # Same as sample, but expects latent vectors 'ws' instead of Gaussian noise 'z'
-        planes = self.backbone.synthesis(ws, update_emas = update_emas, **synthesis_kwargs)
+        planes, x, img_raw, x_raw = self.backbone.synthesis(ws, update_emas = update_emas, **synthesis_kwargs)
         planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
         return self.renderer.run_model(planes, self.decoder, coordinates, directions, self.rendering_kwargs)
 
