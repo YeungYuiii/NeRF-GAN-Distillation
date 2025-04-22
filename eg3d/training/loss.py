@@ -117,7 +117,7 @@ class StyleGAN2Loss(Loss):
         self.vggloss = VGGLoss(device=device)
         assert self.gpc_reg_prob is None or (0 <= self.gpc_reg_prob <= 1)
 
-    def run_G(self, z, c, swapping_prob, neural_rendering_resolution, update_emas=False):
+    def run_G(self, z, c, swapping_prob, neural_rendering_resolution, update_emas=False, require_grad=False):
         if swapping_prob is not None:
             c_swapped = torch.roll(c.clone(), 1, 0)
             c_gen_conditioning = torch.where(torch.rand((c.shape[0], 1), device=c.device) < swapping_prob, c_swapped, c)
@@ -127,6 +127,8 @@ class StyleGAN2Loss(Loss):
         ws = self.G_eg3d.mapping(z, c_gen_conditioning, update_emas=update_emas)
         eg3d_output = self.G_eg3d.synthesis(ws, c_gen_conditioning, neural_rendering_resolution=neural_rendering_resolution, update_emas=update_emas)
         ws = self.G.mapping(ws[:, 0, :], c_gen_conditioning, update_emas=update_emas)
+        if require_grad:
+            ws.requires_grad_(True)
         if self.style_mixing_prob > 0:
             with torch.autograd.profiler.record_function('style_mixing'):
                 cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
@@ -181,9 +183,9 @@ class StyleGAN2Loss(Loss):
 
         real_img = {'image': real_img, 'image_raw': real_img_raw}
 
-        # Gmain: Distillation loss.
+        # Gmain: Maximize logits for generated images.
         if phase in ['Gmain', 'Gboth']:
-            with torch.autograd.profiler.record_function('Dis_forward'):
+            with torch.autograd.profiler.record_function('Gmain_forward'):
                 gen_img, eg3d_img, _gen_ws = self.run_G(gen_z, gen_c, swapping_prob=swapping_prob, neural_rendering_resolution=neural_rendering_resolution)
                 loss_feature = torch.nn.functional.smooth_l1_loss(gen_img['feature_image'], eg3d_img['feature_image'])
                 loss_vgg_LR = self.vggloss(gen_img['image_raw'], eg3d_img['image_raw'])
@@ -191,32 +193,41 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Loss/G/loss_feature', loss_feature)
                 training_stats.report('Loss/G/loss_vgg_LR', loss_vgg_LR)
                 training_stats.report('Loss/G/loss_vgg_HR', loss_vgg_HR)
-            with torch.autograd.profiler.record_function('Dis_backward'):
-                (loss_feature + loss_vgg_LR + loss_vgg_HR).mean().mul(gain).backward()
-
-        # # Gmain: Maximize logits for generated images.
-        # if phase in ['Gmain', 'Gboth']:
-        #     with torch.autograd.profiler.record_function('Gmain_forward'):
-        #         gen_img, eg3d_img, _gen_ws = self.run_G(gen_z, gen_c, swapping_prob=swapping_prob, neural_rendering_resolution=neural_rendering_resolution)
-        #         gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)
-        #         training_stats.report('Loss/scores/fake', gen_logits)
-        #         training_stats.report('Loss/signs/fake', gen_logits.sign())
-        #         loss_Gmain = torch.nn.functional.softplus(-gen_logits)
-        #         training_stats.report('Loss/G/loss', loss_Gmain)
-        #     with torch.autograd.profiler.record_function('Gmain_backward'):
-        #         loss_Gmain.mean().mul(gain).backward()
+                gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)
+                training_stats.report('Loss/scores/fake', gen_logits)
+                training_stats.report('Loss/signs/fake', gen_logits.sign())
+                loss_Gmain = torch.nn.functional.softplus(-gen_logits)
+                training_stats.report('Loss/G/loss', loss_Gmain)
+            with torch.autograd.profiler.record_function('Gmain_backward'):
+                (loss_feature + loss_vgg_LR + loss_vgg_HR + loss_Gmain * 0.1).mean().mul(gain).backward()
 
         # Gmain: Maximize logits for generated images.
-        # if phase in ['Gmain', 'Gboth']:
-        #     with torch.autograd.profiler.record_function('Gmain_forward'):
-        #         gen_img, eg3d_img, _gen_ws = self.run_G(gen_z, gen_c, swapping_prob=swapping_prob, neural_rendering_resolution=neural_rendering_resolution)
-        #         gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)
-        #         training_stats.report('Loss/scores/fake', gen_logits)
-        #         training_stats.report('Loss/signs/fake', gen_logits.sign())
-        #         loss_Gmain = torch.nn.functional.softplus(-gen_logits)
-        #         training_stats.report('Loss/G/loss', loss_Gmain)
-        #     with torch.autograd.profiler.record_function('Gmain_backward'):
-        #         (loss_Gmain * 0.1).mean().mul(gain).backward()
+            # with torch.autograd.profiler.record_function('Gmain_forward'):
+            #     gen_img, eg3d_img, _gen_ws = self.run_G(gen_z, gen_c, swapping_prob=swapping_prob, neural_rendering_resolution=neural_rendering_resolution)
+            #     gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)
+            #     training_stats.report('Loss/scores/fake', gen_logits)
+            #     training_stats.report('Loss/signs/fake', gen_logits.sign())
+            #     loss_Gmain = torch.nn.functional.softplus(-gen_logits)
+            #     training_stats.report('Loss/G/loss', loss_Gmain)
+            # with torch.autograd.profiler.record_function('Gmain_backward'):
+            #     (loss_Gmain).mean().mul(gain).backward()
+
+        # Gpl: Apply path length regularization.
+        # if ['Greg', 'Gboth']:
+        #     with torch.autograd.profiler.record_function('Gpl_forward'):
+        #         gen_img, eg3d_img, gen_ws = self.run_G(gen_z, gen_c, swapping_prob=swapping_prob, neural_rendering_resolution=neural_rendering_resolution, require_grad=True)
+        #         pl_noise = torch.randn_like(gen_img['image']) / np.sqrt(gen_img['image'].shape[2] * gen_img['image'].shape[3])
+        #         with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
+        #             pl_grads = torch.autograd.grad(outputs=[(gen_img['image'] * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
+        #         pl_lengths = pl_grads.square().sum(2).mean(1).sqrt()
+        #         pl_mean = self.pl_mean.lerp(pl_lengths.mean(), self.pl_decay)
+        #         self.pl_mean.copy_(pl_mean.detach())
+        #         pl_penalty = (pl_lengths - pl_mean).square()
+        #         training_stats.report('Loss/pl_penalty', pl_penalty)
+        #         loss_Gpl = pl_penalty * self.pl_weight
+        #         training_stats.report('Loss/G/reg', loss_Gpl)
+        #     with torch.autograd.profiler.record_function('Gpl_backward'):
+        #         (gen_img['image'][:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
 
         # # Density Regularization
         # if phase in ['Greg', 'Gboth'] and self.G.rendering_kwargs.get('density_reg', 0) > 0 and self.G.rendering_kwargs['reg_type'] == 'l1':
@@ -331,7 +342,7 @@ class StyleGAN2Loss(Loss):
         #     TVloss.mul(gain).backward()
 
         # Dmain: Minimize logits for generated images.
-        # loss_Dgen = 0
+        loss_Dgen = 0
         if phase in ['Dmain', 'Dboth']:
             with torch.autograd.profiler.record_function('Dgen_forward'):
                 gen_img, eg3d_img, _gen_ws = self.run_G(gen_z, gen_c, swapping_prob=swapping_prob, neural_rendering_resolution=neural_rendering_resolution, update_emas=True)
@@ -340,7 +351,7 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Dgen = torch.nn.functional.softplus(gen_logits)
             with torch.autograd.profiler.record_function('Dgen_backward'):
-                (loss_Dgen * 0.1).mean().mul(gain).backward()
+                (loss_Dgen).mean().mul(gain).backward()
 
         # Dmain: Maximize logits for real images.
         # Dr1: Apply R1 regularization.
@@ -378,6 +389,6 @@ class StyleGAN2Loss(Loss):
                     training_stats.report('Loss/D/reg', loss_Dr1)
 
             with torch.autograd.profiler.record_function(name + '_backward'):
-                ((loss_Dreal + loss_Dr1) * 0.1).mean().mul(gain).backward()
+                (loss_Dreal + loss_Dr1).mean().mul(gain).backward()
 
 #----------------------------------------------------------------------------

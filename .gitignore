@@ -14,7 +14,7 @@ archive
 *.ply
 eval
 out
-networks
+training-runs
 
 # evaluation:
 temp/

@@ -182,7 +182,7 @@ def generate_images(
 
             ws = G_eg3d.mapping(z, conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
             print(ws.shape)
-            ws = G.mapping(ws[:, 0, :], conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
+            ws = G.mapping(ws[:, 0, :], camera_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
             img = G.synthesis(ws, camera_params)['image']
             # img = G(z, conditioning_params, truncation_psi=truncation_psi)
 
